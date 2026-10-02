@@ -1,0 +1,8 @@
+spring:
+  application:
+    name: url-shortener
+server:
+  port: ${PORT:3000}
+app:
+  base-url: ${BASE_URL:http://localhost:3000}
+  short-code-length: ${SHORT_CODE_LENGTH:7}
