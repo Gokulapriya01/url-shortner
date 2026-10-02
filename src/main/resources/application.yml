@@ -1,8 +1,117 @@
 spring:
   application:
     name: url-shortener
+
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/urlshortener}
+    username: ${DATABASE_USERNAME:postgres}
+    password: ${DATABASE_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    open-in-view: false
+    show-sql: false
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 0
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    default-property-inclusion: non_null
+
 server:
   port: ${PORT:3000}
+  forward-headers-strategy: framework
+  shutdown: graceful
+  servlet:
+    context-path: /
+
 app:
   base-url: ${BASE_URL:http://localhost:3000}
   short-code-length: ${SHORT_CODE_LENGTH:7}
+  cache-ttl-seconds: ${CACHE_TTL_SECONDS:3600}
+  cleanup:
+    enabled: ${CLEANUP_ENABLED:true}
+    interval-ms: ${CLEANUP_INTERVAL_MS:3600000}
+    batch-size: ${CLEANUP_BATCH_SIZE:1000}
+  rate-limit:
+    window-ms: ${RATE_LIMIT_WINDOW_MS:60000}
+    max-shorten: ${RATE_LIMIT_MAX_SHORTEN:100}
+    max-redirect: ${RATE_LIMIT_MAX_REDIRECT:1000}
+    max-analytics: ${RATE_LIMIT_MAX_ANALYTICS:100}
+  orchestration:
+    max-concurrent-tasks: ${ORCHESTRATION_MAX_CONCURRENT_TASKS:5}
+    default-task-timeout-ms: ${ORCHESTRATION_DEFAULT_TASK_TIMEOUT_MS:300000}
+    default-max-retries: ${ORCHESTRATION_DEFAULT_MAX_RETRIES:3}
+    retry-delay-ms: ${ORCHESTRATION_RETRY_DELAY_MS:1000}
+    enable-rollback: ${ORCHESTRATION_ENABLE_ROLLBACK:true}
+    auto-approve-gates: ${ORCHESTRATION_AUTO_APPROVE_GATES:false}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when_authorized
+
+logging:
+  level:
+    com.urlshortener: ${LOG_LEVEL:INFO}
+    org.springframework.web: INFO
+    org.hibernate.SQL: WARN
+  pattern:
+    console: "%d{ISO8601} [%thread] %-5level %logger{36} - %msg%n"
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+  jpa:
+    show-sql: true
+logging:
+  level:
+    com.urlshortener: DEBUG
+    org.hibernate.SQL: DEBUG
+
+---
+spring:
+  config:
+    activate:
+      on-profile: test
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+  flyway:
+    enabled: false
