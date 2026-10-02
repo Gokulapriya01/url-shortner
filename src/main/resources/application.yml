@@ -72,6 +72,43 @@ app:
     enable-rollback: ${ORCHESTRATION_ENABLE_ROLLBACK:true}
     auto-approve-gates: ${ORCHESTRATION_AUTO_APPROVE_GATES:false}
 
+resilience4j:
+  circuitbreaker:
+    instances:
+      database:
+        failure-rate-threshold: 50
+        minimum-number-of-calls: 5
+        wait-duration-in-open-state: 30s
+        sliding-window-size: 10
+        permitted-number-of-calls-in-half-open-state: 3
+        sliding-window-type: COUNT_BASED
+        register-health-indicator: true
+        ignore-exceptions:
+          - com.urlshortener.exception.AliasExistsException
+          - com.urlshortener.exception.InvalidUrlException
+          - com.urlshortener.exception.UrlNotFoundException
+          - com.urlshortener.exception.UrlExpiredException
+      redis:
+        failure-rate-threshold: 50
+        minimum-number-of-calls: 3
+        wait-duration-in-open-state: 10s
+        sliding-window-size: 5
+        permitted-number-of-calls-in-half-open-state: 2
+        sliding-window-type: COUNT_BASED
+        register-health-indicator: true
+  retry:
+    instances:
+      database:
+        max-attempts: 3
+        wait-duration: 100ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        exponential-max-wait-duration: 5s
+        retry-exceptions:
+          - java.sql.SQLException
+          - org.springframework.dao.TransientDataAccessException
+          - org.springframework.jdbc.CannotGetJdbcConnectionException
+
 management:
   endpoints:
     web:

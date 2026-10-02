@@ -135,7 +135,34 @@ class UrlServiceTest {
             verify(shortCodeGenerator, never()).generate();
         }
 
+        @Test
+        @DisplayName("should create short URL with expiration")
+        void shouldCreateShortUrlWithExpiration() {
+            // Given
+            ShortenRequest request = new ShortenRequest();
+            request.setUrl(VALID_URL);
+            request.setExpiresIn(3600L); // 1 hour
 
+            when(urlValidator.validate(VALID_URL))
+                .thenReturn(ValidationResult.valid(VALID_URL));
+            when(shortCodeGenerator.generate()).thenReturn(SHORT_CODE);
+            when(urlRepository.existsByShortCode(SHORT_CODE)).thenReturn(false);
+            when(urlRepository.existsByCustomAlias(SHORT_CODE)).thenReturn(false);
+            when(urlRepository.save(any(Url.class))).thenAnswer(invocation -> {
+                Url url = invocation.getArgument(0);
+                url.setId(UUID.randomUUID());
+                url.setCreatedAt(Instant.now());
+                return url;
+            });
+
+            // When
+            ShortenResponse response = urlService.createShortUrl(request);
+
+            // Then
+            assertNotNull(response);
+            assertNotNull(response.getExpiresAt());
+            assertTrue(response.getExpiresAt().isAfter(Instant.now()));
+        }
 
         @Test
         @DisplayName("should throw InvalidUrlException for invalid URL")
@@ -240,11 +267,33 @@ class UrlServiceTest {
     @DisplayName("resolveShortCode")
     class ResolveShortCode {
 
+        @Test
+        void shouldResolveUnexpiredCachedUrl() {
+            UUID urlId = UUID.randomUUID();
+            when(cacheService.getUrl(SHORT_CODE)).thenReturn(Optional.of(
+                new CacheService.CachedUrl(VALID_URL, urlId, Instant.now().plusSeconds(60))));
+            assertEquals(VALID_URL, urlService.resolveShortCode(SHORT_CODE).originalUrl());
+            verifyNoInteractions(urlRepository);
+            verify(cacheService, never()).deleteUrl(anyString());
+        }
 
+        @Test
+        void shouldRejectAndInvalidateExpiredCachedUrl() {
+            when(cacheService.getUrl(SHORT_CODE)).thenReturn(Optional.of(
+                new CacheService.CachedUrl(VALID_URL, UUID.randomUUID(), Instant.now().minusSeconds(1))));
+            assertThrows(UrlExpiredException.class, () -> urlService.resolveShortCode(SHORT_CODE));
+            verify(cacheService).deleteUrl(SHORT_CODE);
+            verifyNoInteractions(urlRepository);
+        }
 
-
-
-
+        @Test
+        void shouldPreserveExpirationErrorWhenCacheInvalidationFails() {
+            when(cacheService.getUrl(SHORT_CODE)).thenReturn(Optional.of(
+                new CacheService.CachedUrl(VALID_URL, UUID.randomUUID(), Instant.now().minusSeconds(1))));
+            doThrow(new RuntimeException("Redis unavailable")).when(cacheService).deleteUrl(SHORT_CODE);
+            assertThrows(UrlExpiredException.class, () -> urlService.resolveShortCode(SHORT_CODE));
+            verifyNoInteractions(urlRepository);
+        }
 
         @Test
         @DisplayName("should resolve from cache when available")
@@ -308,7 +357,27 @@ class UrlServiceTest {
             );
         }
 
+        @Test
+        @DisplayName("should throw UrlExpiredException when URL is expired")
+        void shouldThrowUrlExpiredExceptionWhenExpired() {
+            // Given
+            Url expiredUrl = Url.builder()
+                .id(UUID.randomUUID())
+                .shortCode(SHORT_CODE)
+                .originalUrl(VALID_URL)
+                .expiresAt(Instant.now().minusSeconds(3600)) // Expired 1 hour ago
+                .build();
 
+            when(cacheService.getUrl(SHORT_CODE)).thenReturn(Optional.empty());
+            when(urlRepository.findByShortCodeOrCustomAlias(SHORT_CODE))
+                .thenReturn(Optional.of(expiredUrl));
+
+            // When/Then
+            assertThrows(
+                UrlExpiredException.class,
+                () -> urlService.resolveShortCode(SHORT_CODE)
+            );
+        }
     }
 
     @Nested
