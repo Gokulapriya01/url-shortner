@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.urlshortener.domain.entity.Url;
+import com.urlshortener.service.ClickTrackingService;
 import com.urlshortener.service.RateLimitService;
 import com.urlshortener.service.UrlService;
 import com.urlshortener.service.UrlService.ResolveResult;
@@ -24,6 +25,7 @@ import lombok.extern.slf4j.Slf4j;
 public class RedirectController {
 
     private final UrlService urlService;
+    private final ClickTrackingService clickTrackingService;
     private final RateLimitService rateLimitService;
 
     /** Checks rate limits, resolves the link and queues tracking before returning its redirect. */
@@ -38,6 +40,14 @@ public class RedirectController {
         log.debug("Resolving short code: code={}", code);
 
         ResolveResult result = urlService.resolveShortCode(code);
+
+        // Track click asynchronously
+        clickTrackingService.trackClick(
+            result.urlId(),
+            request.getHeader("Referer"),
+            request.getHeader("User-Agent"),
+            clientIp
+        );
 
         // Determine redirect status
         // 301 (permanent) for non-expiring URLs
