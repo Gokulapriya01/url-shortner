@@ -1,0 +1,10 @@
+<configuration>
+  <springProperty scope="context" name="appLevel" source="logging.level.com.urlshortener" defaultValue="INFO"/>
+  <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <customFields>{"service":"url-shortener"}</customFields>
+    </encoder>
+  </appender>
+  <logger name="com.urlshortener" level="${appLevel}"/>
+  <root level="INFO"><appender-ref ref="JSON"/></root>
+</configuration>

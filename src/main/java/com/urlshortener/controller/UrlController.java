@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.urlshortener.dto.request.ShortenRequest;
 import com.urlshortener.dto.response.ShortenResponse;
+import com.urlshortener.service.RateLimitService;
 import com.urlshortener.service.UrlService;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -23,6 +24,7 @@ import lombok.extern.slf4j.Slf4j;
 public class UrlController {
 
     private final UrlService urlService;
+    private final RateLimitService rateLimitService;
 
     /** Shorten. */
     @PostMapping("/shorten")
@@ -32,6 +34,7 @@ public class UrlController {
             HttpServletRequest httpRequest) {
 
         String clientIp = getClientIp(httpRequest);
+        rateLimitService.checkShortenLimit(clientIp);
 
         log.debug("Shortening URL: url={}, customAlias={}", request.getUrl(), request.getCustomAlias());
 

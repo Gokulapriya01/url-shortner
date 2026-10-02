@@ -23,4 +23,6 @@ public class ShortenRequest {
     @Pattern(regexp = "^[a-zA-Z0-9_-]+$", message = "Custom alias can only contain letters, numbers, hyphens, and underscores")
     private String customAlias;
 
+    @Positive(message = "Expiration time must be positive")
+    private Long expiresIn; // seconds
 }

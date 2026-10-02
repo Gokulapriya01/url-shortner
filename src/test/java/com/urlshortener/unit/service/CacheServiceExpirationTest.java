@@ -35,9 +35,25 @@ class CacheServiceExpirationTest {
         service = new CacheServiceImpl(redis, mapper, new AppProperties());
     }
 
+    @Test
+    void subsecondExpiryCapsTtlAndStoresExpiry() throws Exception {
+        Instant expiry = Instant.now().plusMillis(750);
+        Instant before = Instant.now();
+        service.cacheUrl("code", "https://example.com", id, expiry);
+        ArgumentCaptor<Duration> ttl = ArgumentCaptor.forClass(Duration.class);
+        ArgumentCaptor<Object> payload = ArgumentCaptor.forClass(Object.class);
+        verify(values).set(eq("url:code"), payload.capture(), ttl.capture());
+        assertThat(ttl.getValue()).isPositive().isLessThanOrEqualTo(Duration.between(before, expiry));
+        assertThat(ttl.getValue()).isLessThan(Duration.ofSeconds(1));
+        assertThat(mapper.readValue((String) payload.getValue(), CacheService.CachedUrl.class).expiresAt())
+            .isEqualTo(expiry);
+    }
 
-
-
+    @Test
+    void distantExpiryUsesConfiguredTtl() {
+        service.cacheUrl("code", "https://example.com", id, Instant.now().plusSeconds(7200));
+        verify(values).set(eq("url:code"), any(), eq(Duration.ofSeconds(3600)));
+    }
 
     @Test
     void permanentUrlUsesConfiguredTtlAndExplicitNullExpiry() throws Exception {
@@ -49,7 +65,11 @@ class CacheServiceExpirationTest {
         assertThat(service.getUrl("code")).contains(new CacheService.CachedUrl("https://example.com", id, null));
     }
 
-
+    @Test
+    void expiredUrlIsNotCached() {
+        service.cacheUrl("code", "https://example.com", id, Instant.now().minusSeconds(1));
+        verifyNoInteractions(values);
+    }
 
     @Test
     void missingAndCorruptEntriesAreMissesAndDeletionUsesCorrectKey() {

@@ -20,6 +20,8 @@ import com.urlshortener.util.ShortCodeGenerator;
 import com.urlshortener.util.UrlValidator;
 import com.urlshortener.util.UrlValidator.ValidationResult;
 
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -39,6 +41,8 @@ public class UrlServiceImpl implements UrlService {
     /** Validates and persists a URL, then returns its short link and expiration metadata. */
     @Override
     @Transactional
+    @CircuitBreaker(name = "database")
+    @Retry(name = "database")
     public ShortenResponse createShortUrl(ShortenRequest request) {
         // Validate URL
         ValidationResult validation = urlValidator.validate(request.getUrl());
@@ -66,7 +70,9 @@ public class UrlServiceImpl implements UrlService {
             shortCode = generateUniqueShortCode();
         }
 
-        Instant expiresAt = null;
+        Instant expiresAt = request.getExpiresIn() != null
+            ? Instant.now().plusSeconds(request.getExpiresIn())
+            : null;
 
         Url url = Url.builder()
             .shortCode(shortCode)
@@ -93,10 +99,21 @@ public class UrlServiceImpl implements UrlService {
 
     /** Resolves a short code through cache or database and rejects expired links. */
     @Override
+    @CircuitBreaker(name = "database")
+    @Retry(name = "database")
     public ResolveResult resolveShortCode(String shortCode) {
         // Try cache first
         Optional<CacheService.CachedUrl> cached = cacheService.getUrl(shortCode);
         if (cached.isPresent()) {
+            Instant expiresAt = cached.get().expiresAt();
+            if (expiresAt != null && !expiresAt.isAfter(Instant.now())) {
+                try {
+                    cacheService.deleteUrl(shortCode);
+                } catch (RuntimeException e) {
+                    log.warn("Failed to invalidate expired URL cache: shortCode={}", shortCode, e);
+                }
+                throw new UrlExpiredException(shortCode);
+            }
             log.debug("URL resolved from cache: shortCode={}", shortCode);
             return new ResolveResult(cached.get().originalUrl(), cached.get().urlId(), false, cached.get().expiresAt());
         }
@@ -104,6 +121,11 @@ public class UrlServiceImpl implements UrlService {
         // Fetch from database
         Url url = urlRepository.findByShortCodeOrCustomAlias(shortCode)
             .orElseThrow(() -> new UrlNotFoundException(shortCode));
+
+        // Check expiration
+        if (url.isExpired()) {
+            throw new UrlExpiredException(shortCode);
+        }
 
         // Cache the result
         cacheService.cacheUrl(shortCode, url.getOriginalUrl(), url.getId(), url.getExpiresAt());
