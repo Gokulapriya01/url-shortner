@@ -12,6 +12,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.urlshortener.config.AppProperties;
 
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -28,6 +29,7 @@ public class CacheServiceImpl implements CacheService {
 
     /** Reads a cached URL; missing, legacy or malformed entries are cache misses. */
     @Override
+    @CircuitBreaker(name = "redis", fallbackMethod = "getUrlFallback")
     public Optional<CachedUrl> getUrl(String shortCode) {
         String key = URL_CACHE_PREFIX + shortCode;
         Object value = redisTemplate.opsForValue().get(key);
@@ -51,6 +53,7 @@ public class CacheServiceImpl implements CacheService {
 
     /** Caches a URL for no longer than its remaining lifetime. */
     @Override
+    @CircuitBreaker(name = "redis", fallbackMethod = "cacheUrlFallback")
     public void cacheUrl(String shortCode, String originalUrl, UUID urlId, Instant expiresAt) {
         String key = URL_CACHE_PREFIX + shortCode;
 
@@ -59,7 +62,10 @@ public class CacheServiceImpl implements CacheService {
             String value = objectMapper.writeValueAsString(cachedUrl);
 
             Duration ttl = Duration.ofSeconds(appProperties.getCacheTtlSeconds());
-
+            if (expiresAt != null) {
+                Duration remaining = Duration.between(Instant.now(), expiresAt);
+                ttl = remaining.compareTo(ttl) < 0 ? remaining : ttl;
+            }
 
             // Redis TTL precision is milliseconds; never round a short lifetime up.
             if (ttl.toMillis() > 0) {

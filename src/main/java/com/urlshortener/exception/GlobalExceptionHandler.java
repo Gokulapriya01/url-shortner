@@ -11,6 +11,7 @@ import org.springframework.web.servlet.NoHandlerFoundException;
 
 import com.urlshortener.dto.response.ApiErrorResponse;
 
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import lombok.extern.slf4j.Slf4j;
 
 @RestControllerAdvice
@@ -58,7 +59,14 @@ public class GlobalExceptionHandler {
                 "Too many requests. Please try again later."));
     }
 
-
+    /** Handle circuit breaker open. */
+    @ExceptionHandler(CallNotPermittedException.class)
+    public ResponseEntity<ApiErrorResponse> handleCircuitBreakerOpen(CallNotPermittedException ex) {
+        log.error("Circuit breaker open: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+            .body(new ApiErrorResponse("SERVICE_UNAVAILABLE",
+                "Service temporarily unavailable. Please try again later."));
+    }
 
     /** Handle validation. */
     @ExceptionHandler(MethodArgumentNotValidException.class)
