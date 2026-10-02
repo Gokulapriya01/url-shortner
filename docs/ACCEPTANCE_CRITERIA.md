@@ -2,7 +2,7 @@
 
 **Document ID:** AC-DOC-001
 **Version:** 2.0
-**Status:** `PLANNED`
+**Status:** `COMPLETED`
 **Approved Date:** 2026-10-01
 **Updated:** 2026-10-01 (Java/Spring Boot Migration)
 **Approved By:** Human-in-the-Loop
@@ -173,12 +173,12 @@
 
 | ID | Given | When | Then | Priority | Verification | Status |
 |----|-------|------|------|----------|--------------|--------|
-| AC-10.1 | Code written | Structure reviewed | Clear layers: controllers, services, repositories | Must | Code Review | Planned |
-| AC-10.2 | Core services exist | Coverage measured | >80% line coverage | Must | Coverage Report | Planned |
-| AC-10.3 | API endpoints exist | Integration tests run | All endpoints have tests | Must | Test Suite | Planned |
-| AC-10.4 | Code committed | Build runs | Zero Maven compile errors | Must | CI Check | Planned |
-| AC-10.5 | Java compiled | Strict types enabled | Proper use of generics and Optional | Should | CI Check | Planned |
-| AC-10.6 | Public APIs exist | Documentation reviewed | Javadoc on all public methods | Should | Code Review | Planned |
+| AC-10.1 | Code written | Structure reviewed | Clear layers: controllers, services, repositories | Must | Code Review | Completed |
+| AC-10.2 | Core services exist | Coverage measured | >80% line coverage | Must | Coverage Report | Completed |
+| AC-10.3 | API endpoints exist | Integration tests run | All endpoints have tests | Must | Test Suite | Completed |
+| AC-10.4 | Code committed | Build runs | Zero Maven compile errors | Must | CI Check | Completed |
+| AC-10.5 | Java compiled | Strict types enabled | Proper use of generics and Optional | Should | CI Check | Completed |
+| AC-10.6 | Public APIs exist | Documentation reviewed | Javadoc on all public methods | Should | Code Review | Completed |
 
 **Test Coverage Required:** CI pipeline validation
 
