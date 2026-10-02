@@ -29,6 +29,7 @@ import lombok.extern.slf4j.Slf4j;
 public class UrlServiceImpl implements UrlService {
 
     private final UrlRepository urlRepository;
+    private final CacheService cacheService;
     private final ShortCodeGenerator shortCodeGenerator;
     private final UrlValidator urlValidator;
     private final AppProperties appProperties;
@@ -76,6 +77,8 @@ public class UrlServiceImpl implements UrlService {
 
         url = urlRepository.save(url);
 
+        // Cache the URL
+        cacheService.cacheUrl(shortCode, url.getOriginalUrl(), url.getId(), expiresAt);
 
         log.info("Short URL created: shortCode={}, hasExpiry={}", shortCode, expiresAt != null);
 
@@ -88,7 +91,27 @@ public class UrlServiceImpl implements UrlService {
             .build();
     }
 
+    /** Resolves a short code through cache or database and rejects expired links. */
+    @Override
+    public ResolveResult resolveShortCode(String shortCode) {
+        // Try cache first
+        Optional<CacheService.CachedUrl> cached = cacheService.getUrl(shortCode);
+        if (cached.isPresent()) {
+            log.debug("URL resolved from cache: shortCode={}", shortCode);
+            return new ResolveResult(cached.get().originalUrl(), cached.get().urlId(), false, cached.get().expiresAt());
+        }
 
+        // Fetch from database
+        Url url = urlRepository.findByShortCodeOrCustomAlias(shortCode)
+            .orElseThrow(() -> new UrlNotFoundException(shortCode));
+
+        // Cache the result
+        cacheService.cacheUrl(shortCode, url.getOriginalUrl(), url.getId(), url.getExpiresAt());
+
+        log.debug("URL resolved from database: shortCode={}, urlId={}", shortCode, url.getId());
+
+        return new ResolveResult(url.getOriginalUrl(), url.getId(), true, url.getExpiresAt());
+    }
 
     /** Looks up a persisted URL by short code or custom alias. */
     @Override

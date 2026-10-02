@@ -12,6 +12,8 @@ public interface UrlService {
     /** Create short url. */
     ShortenResponse createShortUrl(ShortenRequest request);
 
+    /** Resolve short code. */
+    ResolveResult resolveShortCode(String shortCode);
 
     /** Get url by short code. */
     Optional<Url> getUrlByShortCode(String shortCode);

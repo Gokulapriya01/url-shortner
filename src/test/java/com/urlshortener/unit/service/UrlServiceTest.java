@@ -29,6 +29,7 @@ import com.urlshortener.exception.InvalidUrlException;
 import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.exception.UrlNotFoundException;
 import com.urlshortener.repository.UrlRepository;
+import com.urlshortener.service.CacheService;
 import com.urlshortener.service.UrlService.ResolveResult;
 import com.urlshortener.service.UrlServiceImpl;
 import com.urlshortener.util.ShortCodeGenerator;
@@ -43,6 +44,8 @@ class UrlServiceTest {
     @Mock
     private UrlRepository urlRepository;
 
+    @Mock
+    private CacheService cacheService;
 
     @Mock
     private ShortCodeGenerator shortCodeGenerator;
@@ -99,6 +102,7 @@ class UrlServiceTest {
             assertNull(response.getExpiresAt());
 
             verify(urlRepository).save(any(Url.class));
+            verify(cacheService).cacheUrl(eq(SHORT_CODE), eq(VALID_URL), any(UUID.class), isNull());
         }
 
         @Test
@@ -232,7 +236,80 @@ class UrlServiceTest {
         }
     }
 
+    @Nested
+    @DisplayName("resolveShortCode")
+    class ResolveShortCode {
 
+
+
+
+
+
+
+        @Test
+        @DisplayName("should resolve from cache when available")
+        void shouldResolveFromCacheWhenAvailable() {
+            // Given
+            UUID urlId = UUID.randomUUID();
+            when(cacheService.getUrl(SHORT_CODE))
+                .thenReturn(Optional.of(new CacheService.CachedUrl(VALID_URL, urlId, null)));
+
+            // When
+            ResolveResult result = urlService.resolveShortCode(SHORT_CODE);
+
+            // Then
+            assertNotNull(result);
+            assertEquals(VALID_URL, result.originalUrl());
+            assertEquals(urlId, result.urlId());
+            assertFalse(result.fromDatabase());
+
+            verify(urlRepository, never()).findByShortCodeOrCustomAlias(anyString());
+        }
+
+        @Test
+        @DisplayName("should resolve from database when not in cache")
+        void shouldResolveFromDatabaseWhenNotInCache() {
+            // Given
+            UUID urlId = UUID.randomUUID();
+            Url url = Url.builder()
+                .id(urlId)
+                .shortCode(SHORT_CODE)
+                .originalUrl(VALID_URL)
+                .build();
+
+            when(cacheService.getUrl(SHORT_CODE)).thenReturn(Optional.empty());
+            when(urlRepository.findByShortCodeOrCustomAlias(SHORT_CODE))
+                .thenReturn(Optional.of(url));
+
+            // When
+            ResolveResult result = urlService.resolveShortCode(SHORT_CODE);
+
+            // Then
+            assertNotNull(result);
+            assertEquals(VALID_URL, result.originalUrl());
+            assertEquals(urlId, result.urlId());
+            assertTrue(result.fromDatabase());
+
+            verify(cacheService).cacheUrl(eq(SHORT_CODE), eq(VALID_URL), eq(urlId), isNull());
+        }
+
+        @Test
+        @DisplayName("should throw UrlNotFoundException when URL not found")
+        void shouldThrowUrlNotFoundExceptionWhenNotFound() {
+            // Given
+            when(cacheService.getUrl(SHORT_CODE)).thenReturn(Optional.empty());
+            when(urlRepository.findByShortCodeOrCustomAlias(SHORT_CODE))
+                .thenReturn(Optional.empty());
+
+            // When/Then
+            assertThrows(
+                UrlNotFoundException.class,
+                () -> urlService.resolveShortCode(SHORT_CODE)
+            );
+        }
+
+
+    }
 
     @Nested
     @DisplayName("getUrlByShortCode")
