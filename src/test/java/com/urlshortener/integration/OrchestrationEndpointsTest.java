@@ -63,6 +63,22 @@ class OrchestrationEndpointsTest {
             .andExpect(jsonPath("$.completedTasks").value(1));
         mvc.perform(post(path + "/execute")).andExpect(status().isOk())
             .andExpect(jsonPath("$.executedCount").value(0));
+        mvc.perform(get(path + "/audit")).andExpect(status().isOk())
+            .andExpect(jsonPath("$[0].actor").value("system"));
+        mvc.perform(get(path + "/metrics")).andExpect(status().isOk())
+            .andExpect(jsonPath("$.successRate").value(1.0));
+        mvc.perform(put(path + "/tasks/test-task/output").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"newValue\":1}")).andExpect(status().isOk());
+        mvc.perform(put(path + "/context").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"key\":\"shared\",\"value\":\"verified\"}")).andExpect(status().isOk());
+        mvc.perform(get(path + "/context/shared")).andExpect(status().isOk()).andExpect(jsonPath("$.value").value("verified"));
+        mvc.perform(post(path + "/pause")).andExpect(status().isOk());
+        mvc.perform(post(path + "/resume")).andExpect(status().isOk());
+        mvc.perform(post(path + "/gates/" + session.get("gates").get(0).get("id").asText() + "/reject")
+            .contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"review\"}")).andExpect(status().isOk());
+        mvc.perform(post(path + "/rollback").contentType(MediaType.APPLICATION_JSON).content("{\"targetPhase\":0}"))
+            .andExpect(status().isOk());
+        mvc.perform(post(path + "/cancel")).andExpect(status().isOk());
     }
 
     @Test

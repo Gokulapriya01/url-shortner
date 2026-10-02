@@ -21,6 +21,7 @@ import com.urlshortener.dto.request.GateApprovalRequest;
 import com.urlshortener.dto.request.GateRegistrationRequest;
 import com.urlshortener.dto.request.SessionCreateRequest;
 import com.urlshortener.dto.request.TaskRegistrationRequest;
+import com.urlshortener.dto.response.MetricsResponse;
 import com.urlshortener.dto.response.SessionResponse;
 import com.urlshortener.orchestration.OrchestrationEngine;
 import com.urlshortener.orchestration.OrchestrationEngine.OrchestrationSession;
@@ -92,9 +93,27 @@ public class OrchestrationController {
         ));
     }
 
+    /** Prevents subsequent task starts while allowing active handlers to reach a checkpoint. */
+    @PostMapping("/sessions/{id}/pause")
+    public ResponseEntity<Map<String, Object>> pauseSession(@PathVariable UUID id) {
+        boolean success = orchestrationEngine.pauseSession(id);
+        if (!success) {
+            return ResponseEntity.badRequest()
+                .body(Map.of("error", "Cannot pause session"));
+        }
+        return ResponseEntity.ok(Map.of("success", true));
+    }
 
-
-
+    /** Reactivates a paused session without discarding its context. */
+    @PostMapping("/sessions/{id}/resume")
+    public ResponseEntity<Map<String, Object>> resumeSession(@PathVariable UUID id) {
+        boolean success = orchestrationEngine.resumeSession(id);
+        if (!success) {
+            return ResponseEntity.badRequest()
+                .body(Map.of("error", "Cannot resume session"));
+        }
+        return ResponseEntity.ok(Map.of("success", true));
+    }
 
     /** Marks a session cancelled and prevents subsequent task starts. */
     @PostMapping("/sessions/{id}/cancel")
@@ -106,7 +125,24 @@ public class OrchestrationController {
         return ResponseEntity.ok(Map.of("success", true));
     }
 
+    /** Rollback. */
+    @PostMapping("/sessions/{id}/rollback")
+    public ResponseEntity<Map<String, Object>> rollback(
+            @PathVariable UUID id,
+            @RequestBody Map<String, Integer> request) {
+        Integer targetPhase = request.get("targetPhase");
+        if (targetPhase == null) {
+            return ResponseEntity.badRequest()
+                .body(Map.of("error", "targetPhase is required"));
+        }
 
+        boolean success = orchestrationEngine.rollbackToPhase(id, targetPhase);
+        if (!success) {
+            return ResponseEntity.badRequest()
+                .body(Map.of("error", "Rollback failed"));
+        }
+        return ResponseEntity.ok(Map.of("success", true, "rolledBackToPhase", targetPhase));
+    }
 
     /** Records approval and the actor for a session gate. */
     @PostMapping("/sessions/{sessionId}/gates/{gateId}/approve")
@@ -140,11 +176,32 @@ public class OrchestrationController {
         return ResponseEntity.ok(Map.of("success", true));
     }
 
+    /** Replaces completed upstream output and replans its downstream tasks. */
+    @PutMapping("/sessions/{id}/tasks/{definitionId}/output")
+    public ResponseEntity<Map<String, Object>> updateOutput(@PathVariable UUID id,
+            @PathVariable String definitionId, @RequestBody Map<String, Object> output) {
+        return orchestrationEngine.updateTaskOutput(id, definitionId, output)
+            ? ResponseEntity.ok(Map.of("success", true)) : ResponseEntity.notFound().build();
+    }
 
+    /** Returns task transition timestamps, states, actors and reasons for a session. */
+    @GetMapping("/sessions/{id}/audit")
+    public ResponseEntity<?> audit(@PathVariable UUID id) {
+        return orchestrationEngine.getSession(id).map(session -> ResponseEntity.ok(session.getTasks().stream()
+            .flatMap(task -> task.getTransitions().stream()).map(t -> Map.of("timestamp", t.getTimestamp(),
+                "taskId", t.getTask().getId(), "from", t.getFromStatus(), "to", t.getToStatus(),
+                "actor", t.getActor(), "reason", t.getReason())).toList()))
+            .orElse(ResponseEntity.notFound().build());
+    }
 
-
-
-
+    /** Returns current task counts and cumulative retry, rollback, latency and recovery telemetry. */
+    @GetMapping("/sessions/{id}/metrics")
+    public ResponseEntity<MetricsResponse> getMetrics(@PathVariable UUID id) {
+        return orchestrationEngine.getMetrics(id)
+            .map(MetricsResponse::from)
+            .map(ResponseEntity::ok)
+            .orElse(ResponseEntity.notFound().build());
+    }
 
     /** Stores a shared context value for later workflow stages. */
     @PutMapping("/sessions/{id}/context")

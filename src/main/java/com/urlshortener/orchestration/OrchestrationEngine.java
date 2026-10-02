@@ -42,10 +42,23 @@ public class OrchestrationEngine {
     private final Map<String, GateDefinition> gateDefinitions = new ConcurrentHashMap<>();
     private final Map<String, BiFunction<Task, ExecutionContext, TaskHandlerResult>> handlers = new ConcurrentHashMap<>();
 
+    private ExecutorService executor;
 
+    private synchronized ExecutorService executor() {
+        if (executor == null) executor = Executors.newFixedThreadPool(appProperties.getOrchestration().getMaxConcurrentTasks());
+        return executor;
+    }
 
-
-
+    /** Stops background execution and waits for pending work to drain. */
+    @PreDestroy
+    public synchronized void shutdown() {
+        if (executor != null) {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) executor.shutdownNow();
+            } catch (InterruptedException e) { executor.shutdownNow(); Thread.currentThread().interrupt(); }
+        }
+    }
 
     /** Registers task definitions for subsequently created sessions. */
     public void registerTasks(List<TaskDefinition> tasks) {
@@ -195,12 +208,29 @@ public class OrchestrationEngine {
             .toList();
 
         List<Task> executedTasks = new ArrayList<>();
-        for (String taskDefId : tasksToExecute) {
-            Task task = session.getTasks().stream()
-                .filter(t -> taskDefId.equals(t.getDefinitionId())).findFirst().orElseThrow();
-            executeTask(session, task);
-            resolver.updateTaskStatus(task.getDefinitionId(), task.getStatus());
-            executedTasks.add(task);
+        try {
+            List<CompletableFuture<Task>> futures = tasksToExecute.stream().map(taskDefId ->
+                CompletableFuture.supplyAsync(() -> {
+                    Task task = session.getTasks().stream()
+                        .filter(t -> taskDefId.equals(t.getDefinitionId())).findFirst().orElseThrow();
+                    if (!"active".equals(session.getStatus())) return null;
+                    executeTask(session, task);
+                    return task;
+                }, executor())).toList();
+            for (var future : futures) {
+                Task task = future.join();
+                if (task != null) {
+                    resolver.updateTaskStatus(task.getDefinitionId(), task.getStatus());
+                    executedTasks.add(task);
+                }
+            }
+        } finally {
+            // Reservation is released by executeNext after completion bookkeeping.
+        }
+        if (executedTasks.stream().anyMatch(t -> t.getStatus() == TaskStatus.FAILED)) {
+            rollbackToPhase(sessionId, 0, true);
+            session.setStatus("paused");
+            return executedTasks;
         }
 
         // Check phase completion
@@ -224,29 +254,80 @@ public class OrchestrationEngine {
     private void executeTask(OrchestrationSession session, Task task) {
         TaskDefinition definition = taskDefinitions.get(task.getDefinitionId());
         TaskStateMachine.start(task);
-        emitEvent("task_started", session.getId(), task.getId(), null, null);
-        try {
-            String name = definition != null && definition.getHandler() != null ? definition.getHandler() : "default";
-            var handler = handlers.get(name);
-            TaskHandlerResult result = handler == null
-                ? TaskHandlerResult.builder().success(true).output(Map.of("message", "Auto-completed (no handler)")).build()
-                : handler.apply(task, session.getContext());
-            if (!result.isSuccess()) throw new IllegalStateException(result.getError());
-            Map<String,Object> output = result.getOutput() == null ? Map.of() : result.getOutput();
-            task.setOutput(output);
-            session.getContext().getData().put(task.getDefinitionId(), output);
-            session.getContext().setUpdatedAt(Instant.now());
-            TaskStateMachine.complete(task);
-            session.getMetrics().incrementCompleted();
-            emitEvent("task_completed", session.getId(), task.getId(), null, null);
-        } catch (Exception e) {
-            TaskStateMachine.fail(task, e.getMessage());
-            session.getMetrics().incrementFailed();
-            emitEvent("task_failed", session.getId(), task.getId(), null, null);
+        Instant firstFailure = null;
+        while (true) {
+            emitEvent("task_started", session.getId(), task.getId(), null, null);
+            long start = System.nanoTime();
+            try {
+                String handlerName = definition != null && definition.getHandler() != null ? definition.getHandler() : "default";
+                var handler = handlers.get(handlerName);
+                TaskHandlerResult result = handler == null
+                    ? TaskHandlerResult.builder().success(true).output(Map.of("message", "Auto-completed (no handler)")).build()
+                    : handler.apply(task, session.getContext());
+                if (!result.isSuccess()) throw new IllegalStateException(result.getError());
+                Map<String, Object> output = result.getOutput() == null ? Map.of() : result.getOutput();
+                task.setOutput(output);
+                session.getContext().getData().put(task.getDefinitionId(), output);
+                session.getContext().setUpdatedAt(Instant.now());
+                TaskStateMachine.complete(task);
+                session.getMetrics().incrementCompleted();
+                if (firstFailure != null) session.getMetrics().recordRecovery(java.time.Duration.between(firstFailure, Instant.now()).toMillis());
+                emitEvent("task_completed", session.getId(), task.getId(), null, null);
+                return;
+            } catch (Exception e) {
+                if (firstFailure == null) firstFailure = Instant.now();
+                TaskStateMachine.fail(task, e.getMessage());
+                emitEvent("task_failed", session.getId(), task.getId(), null, null);
+                if (!TaskStateMachine.canRetry(task)) {
+                    session.getMetrics().incrementFailed();
+                    if (definition == null || !"ROLLBACK".equalsIgnoreCase(definition.getOnExhaustion())) {
+                        TaskStateMachine.skip(task, "Retries exhausted");
+                        session.getMetrics().incrementSkipped();
+                    }
+                    return;
+                }
+                long delay = appProperties.getOrchestration().getRetryDelayMs() * (1L << Math.min(task.getRetryCount(), 20));
+                try { Thread.sleep(delay); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
+                // Retry performs the FAILED -> IN_PROGRESS transition; do not start twice.
+                TaskStateMachine.retry(task);
+                session.getMetrics().incrementRetries();
+            } finally {
+                session.getMetrics().recordLatency((System.nanoTime() - start) / 1_000_000);
+            }
         }
     }
 
-
+    /** Replaces an upstream output and invalidates its transitive downstream results. */
+    public boolean updateTaskOutput(UUID sessionId, String definitionId, Map<String, Object> output) {
+        OrchestrationSession session = sessions.get(sessionId);
+        if (session == null) return false;
+        synchronized (session) {
+            if (session.isExecuting()) throw new IllegalArgumentException("Pause and wait for active tasks before replanning");
+            Task upstream = session.getTasks().stream().filter(t -> definitionId.equals(t.getDefinitionId())).findFirst().orElse(null);
+            if (upstream == null) return false;
+            if (upstream.getStatus() != TaskStatus.COMPLETED) throw new IllegalArgumentException("Upstream task must be completed");
+            upstream.setOutput(output);
+            session.getContext().getData().put(definitionId, output);
+            var pending = new java.util.ArrayDeque<String>(session.getDag().getNodes().get(definitionId).getDependents());
+            var seen = new java.util.HashSet<String>();
+            while (!pending.isEmpty()) {
+                String id = pending.remove();
+                if (!seen.add(id)) continue;
+                pending.addAll(session.getDag().getNodes().get(id).getDependents());
+                Task downstream = session.getTasks().stream().filter(t -> id.equals(t.getDefinitionId())).findFirst().orElseThrow();
+                if (downstream.getStatus() != TaskStatus.PENDING) TaskStateMachine.reset(downstream);
+                session.getContext().getData().remove(id);
+            }
+            session.setDag(new DAGBuilder().build(session.getTasks()));
+            session.setCurrentPhase(session.getTasks().stream().filter(t -> t.getStatus() == TaskStatus.PENDING).mapToInt(Task::getPhase).min().orElse(session.getCurrentPhase()));
+            session.setStatus("active");
+            session.setCompletedAt(null);
+            session.getContext().setUpdatedAt(Instant.now());
+            emitEvent("workflow_replanned", sessionId, upstream.getId(), null, session.getCurrentPhase());
+            return true;
+        }
+    }
 
     /** Records approval and the actor for a session gate. */
     public boolean approveGate(UUID sessionId, UUID gateId, String approvedBy) {
@@ -282,9 +363,27 @@ public class OrchestrationEngine {
             .orElse(false);
     }
 
+    /** Prevents subsequent task starts while allowing active handlers to reach a checkpoint. */
+    public boolean pauseSession(UUID sessionId) {
+        OrchestrationSession session = sessions.get(sessionId);
+        if (session == null || !"active".equals(session.getStatus())) return false;
 
+        session.setStatus("paused");
+        emitEvent("session_paused", sessionId, null, null, null);
+        log.info("Session paused: sessionId={}", sessionId);
+        return true;
+    }
 
+    /** Reactivates a paused session without discarding its context. */
+    public boolean resumeSession(UUID sessionId) {
+        OrchestrationSession session = sessions.get(sessionId);
+        if (session == null || !"paused".equals(session.getStatus())) return false;
 
+        session.setStatus("active");
+        emitEvent("session_resumed", sessionId, null, null, null);
+        log.info("Session resumed: sessionId={}", sessionId);
+        return true;
+    }
 
     /** Marks a session cancelled and prevents subsequent task starts. */
     public boolean cancelSession(UUID sessionId) {
@@ -297,9 +396,53 @@ public class OrchestrationEngine {
         return true;
     }
 
+    /** Resets later task/gate state and removes invalidated outputs from shared context. */
+    public boolean rollbackToPhase(UUID sessionId, int targetPhase) {
+        if (targetPhase < 0) throw new IllegalArgumentException("targetPhase must be nonnegative");
+        return rollbackToPhase(sessionId, targetPhase, false);
+    }
 
+    private boolean rollbackToPhase(UUID sessionId, int targetPhase, boolean internal) {
+        if (!appProperties.getOrchestration().isEnableRollback()) {
+            log.warn("Rollback is disabled: sessionId={}", sessionId);
+            return false;
+        }
 
+        OrchestrationSession session = sessions.get(sessionId);
+        if (session == null) return false;
 
+        emitEvent("rollback_started", sessionId, null, null, targetPhase);
+
+        if (session.isExecuting() && !internal) throw new IllegalArgumentException("Wait for active tasks before rollback");
+
+        // Reset tasks in phases after target
+        session.getTasks().forEach(task -> {
+            if (task.getPhase() > targetPhase) {
+                if (task.getStatus() != TaskStatus.PENDING) TaskStateMachine.reset(task);
+                session.getContext().getData().remove(task.getDefinitionId());
+            }
+        });
+
+        // Reset gates
+        session.getGates().forEach(gate -> {
+            if (gate.getPhase() > targetPhase) {
+                gate.setApproved(false);
+                gate.setApprovedBy(null);
+                gate.setApprovedAt(null);
+                gate.setRejectedReason(null);
+            }
+        });
+
+        session.setDag(new DAGBuilder().build(session.getTasks()));
+        session.setStatus("active");
+        session.setCompletedAt(null);
+        session.setCurrentPhase(Math.max(1, targetPhase));
+        session.getMetrics().incrementRollbacks();
+
+        emitEvent("rollback_completed", sessionId, null, null, targetPhase);
+        log.info("Rollback completed: sessionId={}, targetPhase={}", sessionId, targetPhase);
+        return true;
+    }
 
     /** Stores a shared context value for later workflow stages. */
     public boolean updateContext(UUID sessionId, String key, Object value) {
@@ -318,7 +461,16 @@ public class OrchestrationEngine {
         return session != null ? session.getContext().getData().get(key) : null;
     }
 
-
+    /** Returns current task counts and cumulative retry, rollback, latency and recovery telemetry. */
+    public Optional<OrchestrationMetrics> getMetrics(UUID sessionId) {
+        return Optional.ofNullable(sessions.get(sessionId)).map(session -> {
+            var metrics = session.getMetrics();
+            metrics.setCompletedTasks((int) session.getTasks().stream().filter(t -> t.getStatus() == TaskStatus.COMPLETED).count());
+            metrics.setFailedTasks((int) session.getTasks().stream().filter(t -> t.getStatus() == TaskStatus.FAILED || (t.getStatus() == TaskStatus.SKIPPED && t.getError() != null)).count());
+            metrics.setSkippedTasks((int) session.getTasks().stream().filter(t -> t.getStatus() == TaskStatus.SKIPPED).count());
+            return metrics;
+        });
+    }
 
     private void emitEvent(String type, UUID sessionId, UUID taskId, UUID gateId, Integer phase) {
         OrchestrationEvent event = OrchestrationEvent.builder()
